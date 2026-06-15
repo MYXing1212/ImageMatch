@@ -59,18 +59,22 @@ void ApplyVisualizationOverlay(
 {
     std::vector<ImageOverlayPoint> points;
     std::vector<ImageOverlayLine> lines;
-    points.reserve(keypoints.size() + lineSegments.size());
+    points.reserve(keypoints.size());
     lines.reserve(lineSegments.size());
 
-    for (const auto& point : keypoints)
+    // keypoints already includes both feature points and endpoints from BuildFeatureVisualization
+    // Alternate colors: green for feature points, orange for endpoints
+    for (size_t i = 0; i < keypoints.size(); ++i)
     {
-        points.push_back({point, RGB(80, 255, 80), 3});
+        const COLORREF color = (i % 2 == 0) ? RGB(80, 255, 80) : RGB(255, 180, 0);
+        const int radius = (i % 2 == 0) ? 3 : 2;
+        points.push_back({keypoints[i], color, radius});
     }
 
+    // Draw connection lines
     for (const auto& segment : lineSegments)
     {
         lines.push_back({segment.start, segment.end, RGB(0, 220, 255), 1});
-        points.push_back({segment.end, RGB(255, 180, 0), 2});
     }
 
     pane.SetOverlay(points, lines);

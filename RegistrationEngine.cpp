@@ -219,8 +219,14 @@ void BuildFeatureVisualization(
         const cv::Point2d mappedSrcOnTarget = TransformPoint(result.rigidTransform, srcPoint);
         const cv::Point2d mappedTargetOnSrc = TransformPoint(targetToSrc, targetPoint);
 
+        // Store only the feature point locations, not the mapped points
+        // The mapped points are stored in the lines, and should not be duplicated in visualization points
         result.srcVisualizationPoints.push_back(srcPoint);
+        result.srcVisualizationPoints.push_back(mappedTargetOnSrc);  // End point of the line in Source pane
+        
         result.targetVisualizationPoints.push_back(targetPoint);
+        result.targetVisualizationPoints.push_back(mappedSrcOnTarget);  // End point of the line in Target pane
+        
         result.srcVisualizationLines.push_back({srcPoint, mappedTargetOnSrc});
         result.targetVisualizationLines.push_back({mappedSrcOnTarget, targetPoint});
 
@@ -317,17 +323,36 @@ cv::Mat StitchImages(const cv::Mat& srcImage, const cv::Mat& targetImage, const 
         cv::BORDER_CONSTANT,
         cv::Scalar::all(0));
 
-    const cv::Rect targetRoi(offsetX, offsetY, targetImage.cols, targetImage.rows);
-    cv::Mat canvasRoi = canvas(targetRoi);
-    const cv::Mat overlapMask = warpedMask(targetRoi);
-
-    cv::Mat nonOverlapMask;
-    cv::bitwise_not(overlapMask, nonOverlapMask);
-    targetImage.copyTo(canvasRoi, nonOverlapMask);
-
-    cv::Mat blended;
-    cv::addWeighted(canvasRoi, 0.5, targetImage, 0.5, 0.0, blended);
-    blended.copyTo(canvasRoi, overlapMask);
+    // Blend target image into canvas at the offset position
+    const int targetStartX = offsetX;
+    const int targetStartY = offsetY;
+    const int targetEndX = std::min(targetStartX + targetImage.cols, canvas.cols);
+    const int targetEndY = std::min(targetStartY + targetImage.rows, canvas.rows);
+    
+    if (targetStartX >= 0 && targetStartY >= 0 && targetEndX > targetStartX && targetEndY > targetStartY)
+    {
+        const int roiWidth = targetEndX - targetStartX;
+        const int roiHeight = targetEndY - targetStartY;
+        
+        cv::Rect targetRoi(targetStartX, targetStartY, roiWidth, roiHeight);
+        cv::Rect targetImageRoi(0, 0, roiWidth, roiHeight);
+        
+        cv::Mat canvasRoi = canvas(targetRoi);
+        cv::Mat targetRoiMat = targetImage(targetImageRoi);
+        cv::Mat maskRoi = warpedMask(targetRoi);
+        
+        // Create inverse mask for non-overlapping regions
+        cv::Mat nonOverlapMask;
+        cv::bitwise_not(maskRoi, nonOverlapMask);
+        
+        // Copy target where there's no overlap
+        targetRoiMat.copyTo(canvasRoi, nonOverlapMask);
+        
+        // Blend where there's overlap
+        cv::Mat blended;
+        cv::addWeighted(canvasRoi, 0.5, targetRoiMat, 0.5, 0.0, blended);
+        blended.copyTo(canvasRoi, maskRoi);
+    }
 
     return canvas;
 }
