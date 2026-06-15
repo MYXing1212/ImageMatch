@@ -205,6 +205,7 @@ void CMainDialog::RunRegistration(RegistrationMethod method)
     const RegistrationResult result = CRegistrationEngine::RegisterAndStitch(m_srcImage, m_targetImage, method);
     if (!result.success)
     {
+        m_resultPane.ShowToast(L"Registration Failed", RGB(255, 0, 0), 1800);
         m_srcPane.SetImage(m_srcImage);
         m_targetPane.SetImage(m_targetImage);
         m_srcPane.ClearOverlay();
@@ -236,6 +237,7 @@ void CMainDialog::RunRegistration(RegistrationMethod method)
     m_stitchedImage = result.stitchedImage.clone();
     m_resultPane.SetImage(m_stitchedImage);
     m_resultPane.ClearOverlay();
+    m_resultPane.ShowToast(L"Registration Succeeded", RGB(0, 200, 0), 1800);
     UpdateResultText(BuildResultSummary(result));
 }
 

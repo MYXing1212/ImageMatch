@@ -5,12 +5,14 @@ namespace
 {
 constexpr double kAbsoluteMinScale = 0.0001;
 constexpr double kMaxScale = 40.0;
+constexpr UINT_PTR kToastTimerId = 1;
 }
 
 BEGIN_MESSAGE_MAP(CImageViewPane, CWnd)
     ON_WM_PAINT()
     ON_WM_ERASEBKGND()
     ON_WM_SIZE()
+    ON_WM_TIMER()
     ON_WM_LBUTTONDOWN()
     ON_WM_LBUTTONUP()
     ON_WM_MOUSEMOVE()
@@ -23,6 +25,7 @@ CImageViewPane::CImageViewPane()
       m_offset(0.0, 0.0),
       m_isDragging(false),
       m_keepImageFitted(true),
+      m_toastTextColor(RGB(255, 255, 255)),
       m_lastMousePoint(0, 0)
 {
 }
@@ -73,6 +76,25 @@ void CImageViewPane::ClearOverlay()
     Invalidate();
 }
 
+void CImageViewPane::ShowToast(const CString& message, COLORREF textColor, UINT durationMs)
+{
+    m_toastMessage = message;
+    m_toastTextColor = textColor;
+    KillTimer(kToastTimerId);
+    if (!m_toastMessage.IsEmpty())
+    {
+        SetTimer(kToastTimerId, durationMs, nullptr);
+    }
+    Invalidate();
+}
+
+void CImageViewPane::ClearToast()
+{
+    KillTimer(kToastTimerId);
+    m_toastMessage.Empty();
+    Invalidate();
+}
+
 void CImageViewPane::ClearImage()
 {
     m_image.release();
@@ -120,6 +142,15 @@ void CImageViewPane::DrawContent(CDC& dc, const CRect& clientRect)
     dc.SetBkMode(TRANSPARENT);
     dc.SetTextColor(RGB(220, 220, 220));
     dc.DrawText(m_title, textRect, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+
+    CString resolutionText = L"No image";
+    if (!m_image.empty())
+    {
+        resolutionText.Format(L"%d x %d", m_image.cols, m_image.rows);
+    }
+    CRect resolutionRect = clientRect;
+    resolutionRect.DeflateRect(0, 0, 8, 0);
+    dc.DrawText(resolutionText, resolutionRect, DT_RIGHT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
 
     if (m_image.empty())
     {
@@ -184,6 +215,20 @@ void CImageViewPane::DrawContent(CDC& dc, const CRect& clientRect)
         dc.SelectObject(oldPen);
         dc.SelectObject(oldBrush);
     }
+
+    if (!m_toastMessage.IsEmpty())
+    {
+        CRect toastRect = clientRect;
+        toastRect.DeflateRect(std::max(24, clientRect.Width() / 5), std::max(24, clientRect.Height() / 3));
+        toastRect.bottom = toastRect.top + 38;
+        dc.FillSolidRect(toastRect, RGB(45, 45, 45));
+        dc.Draw3dRect(toastRect, RGB(110, 110, 110), RGB(110, 110, 110));
+        dc.SetTextColor(m_toastTextColor);
+        CRect toastTextRect = toastRect;
+        toastTextRect.DeflateRect(10, 8);
+        dc.DrawText(m_toastMessage, toastTextRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        dc.SetTextColor(RGB(220, 220, 220));
+    }
 }
 
 BOOL CImageViewPane::OnEraseBkgnd(CDC* pDC)
@@ -199,6 +244,16 @@ void CImageViewPane::OnSize(UINT nType, int cx, int cy)
     {
         FitImageToClient();
     }
+}
+
+void CImageViewPane::OnTimer(UINT_PTR nIDEvent)
+{
+    if (nIDEvent == kToastTimerId)
+    {
+        ClearToast();
+        return;
+    }
+    CWnd::OnTimer(nIDEvent);
 }
 
 void CImageViewPane::OnLButtonDown(UINT nFlags, CPoint point)
