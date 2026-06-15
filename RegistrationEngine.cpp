@@ -10,6 +10,60 @@ struct WorkingPair
     double scale = 1.0;
 };
 
+struct FeatureMethodOptions
+{
+    int maxDimension = 1600;
+    float ratioThreshold = 0.78f;
+    size_t maxMatchesToKeep = 500;
+    size_t visualizationMatches = 80;
+    CString accelerationProfile;
+    bool usedAcceleration = false;
+};
+
+bool IsLargeImagePair(const cv::Mat& srcImage, const cv::Mat& targetImage)
+{
+    const int maxDimension = std::max(
+        std::max(srcImage.cols, srcImage.rows),
+        std::max(targetImage.cols, targetImage.rows));
+    const double maxPixels = std::max(
+        static_cast<double>(srcImage.cols) * static_cast<double>(srcImage.rows),
+        static_cast<double>(targetImage.cols) * static_cast<double>(targetImage.rows));
+    return maxDimension >= 6000 || maxPixels >= 12000000.0;
+}
+
+bool IsVeryLargeImagePair(const cv::Mat& srcImage, const cv::Mat& targetImage)
+{
+    const int maxDimension = std::max(
+        std::max(srcImage.cols, srcImage.rows),
+        std::max(targetImage.cols, targetImage.rows));
+    const double maxPixels = std::max(
+        static_cast<double>(srcImage.cols) * static_cast<double>(srcImage.rows),
+        static_cast<double>(targetImage.cols) * static_cast<double>(targetImage.rows));
+    return maxDimension >= 10000 || maxPixels >= 30000000.0;
+}
+
+double ElapsedMs(int64_t startTick)
+{
+    return static_cast<double>(cv::getTickCount() - startTick) * 1000.0 / cv::getTickFrequency();
+}
+
+void AppendLogLine(CString& logText, const CString& line)
+{
+    if (!logText.IsEmpty())
+    {
+        logText += L"\r\n";
+    }
+    logText += line;
+    TRACE(L"[Registration] %s\n", line.GetString());
+}
+
+cv::Point2d TransformPoint(const cv::Matx33d& transform, const cv::Point2d& point)
+{
+    const cv::Vec3d homogeneous(point.x, point.y, 1.0);
+    const cv::Vec3d mapped = transform * homogeneous;
+    return cv::Point2d(mapped[0], mapped[1]);
+}
+
 cv::Mat ConvertToGray8(const cv::Mat& image)
 {
     if (image.empty())
@@ -131,6 +185,53 @@ void UpdatePoseFields(RegistrationResult& result)
 {
     result.translation = cv::Point2d(result.rigidTransform(0, 2), result.rigidTransform(1, 2));
     result.angleDegrees = std::atan2(result.rigidTransform(1, 0), result.rigidTransform(0, 0)) * 180.0 / CV_PI;
+}
+
+void BuildFeatureVisualization(
+    RegistrationResult& result,
+    const std::vector<cv::KeyPoint>& srcKeypoints,
+    const std::vector<cv::KeyPoint>& targetKeypoints,
+    const std::vector<cv::DMatch>& matches,
+    const cv::Mat& inlierMask,
+    double workingScale,
+    size_t maxVisualizationMatches)
+{
+    if (matches.empty())
+    {
+        return;
+    }
+
+    const cv::Matx33d targetToSrc = result.rigidTransform.inv();
+    size_t visualized = 0;
+    for (size_t i = 0; i < matches.size(); ++i)
+    {
+        if (!inlierMask.empty() && inlierMask.at<uchar>(static_cast<int>(i), 0) == 0)
+        {
+            continue;
+        }
+
+        const cv::Point2d srcPoint(
+            srcKeypoints[matches[i].queryIdx].pt.x / workingScale,
+            srcKeypoints[matches[i].queryIdx].pt.y / workingScale);
+        const cv::Point2d targetPoint(
+            targetKeypoints[matches[i].trainIdx].pt.x / workingScale,
+            targetKeypoints[matches[i].trainIdx].pt.y / workingScale);
+        const cv::Point2d mappedSrcOnTarget = TransformPoint(result.rigidTransform, srcPoint);
+        const cv::Point2d mappedTargetOnSrc = TransformPoint(targetToSrc, targetPoint);
+
+        result.srcVisualizationPoints.push_back(srcPoint);
+        result.targetVisualizationPoints.push_back(targetPoint);
+        result.srcVisualizationLines.push_back({srcPoint, mappedTargetOnSrc});
+        result.targetVisualizationLines.push_back({mappedSrcOnTarget, targetPoint});
+
+        ++visualized;
+        if (visualized >= maxVisualizationMatches)
+        {
+            break;
+        }
+    }
+
+    result.hasFeatureVisualization = !result.srcVisualizationLines.empty();
 }
 
 std::vector<cv::Point2d> TransformCorners(const cv::Size& size, const cv::Matx33d& transform)
@@ -286,19 +387,60 @@ RegistrationResult RunFeatureMethod(
     const CString& methodName,
     const cv::Ptr<cv::Feature2D>& detector,
     int matcherNorm,
-    int maxDimension,
-    float ratioThreshold,
-    size_t maxMatchesToKeep)
+    const FeatureMethodOptions& options)
 {
     RegistrationResult result;
     result.methodName = methodName;
+    result.accelerationProfile = options.accelerationProfile;
+    result.usedAcceleration = options.usedAcceleration;
 
-    const WorkingPair pair = PrepareWorkingPair(srcImage, targetImage, maxDimension);
+    {
+        CString line;
+        line.Format(
+            L"[%s] Input src=%dx%d, target=%dx%d",
+            methodName.GetString(),
+            srcImage.cols,
+            srcImage.rows,
+            targetImage.cols,
+            targetImage.rows);
+        AppendLogLine(result.logText, line);
+    }
+    if (!result.accelerationProfile.IsEmpty())
+    {
+        CString line;
+        line.Format(L"[%s] Acceleration profile: %s", methodName.GetString(), result.accelerationProfile.GetString());
+        AppendLogLine(result.logText, line);
+    }
+
+    const int64_t prepareTick = cv::getTickCount();
+    const WorkingPair pair = PrepareWorkingPair(srcImage, targetImage, options.maxDimension);
     result.workingScale = pair.scale;
+    result.workingWidth = pair.src.cols;
+    result.workingHeight = pair.src.rows;
+    {
+        CString line;
+        line.Format(
+            L"[%s] Prepare working images: %dx%d / %dx%d, scale=%.5f, %.2f ms",
+            methodName.GetString(),
+            pair.src.cols,
+            pair.src.rows,
+            pair.target.cols,
+            pair.target.rows,
+            pair.scale,
+            ElapsedMs(prepareTick));
+        AppendLogLine(result.logText, line);
+    }
 
+    const int64_t grayTick = cv::getTickCount();
     const cv::Mat srcGray = ConvertToGray8(pair.src);
     const cv::Mat targetGray = ConvertToGray8(pair.target);
+    {
+        CString line;
+        line.Format(L"[%s] Convert to gray: %.2f ms", methodName.GetString(), ElapsedMs(grayTick));
+        AppendLogLine(result.logText, line);
+    }
 
+    const int64_t featureTick = cv::getTickCount();
     std::vector<cv::KeyPoint> srcKeypoints;
     std::vector<cv::KeyPoint> targetKeypoints;
     cv::Mat srcDescriptors;
@@ -308,12 +450,23 @@ RegistrationResult RunFeatureMethod(
 
     result.keypointsSrc = static_cast<int>(srcKeypoints.size());
     result.keypointsTarget = static_cast<int>(targetKeypoints.size());
+    {
+        CString line;
+        line.Format(
+            L"[%s] Detect features: src=%d, target=%d, %.2f ms",
+            methodName.GetString(),
+            result.keypointsSrc,
+            result.keypointsTarget,
+            ElapsedMs(featureTick));
+        AppendLogLine(result.logText, line);
+    }
     if (srcDescriptors.empty() || targetDescriptors.empty())
     {
         result.message = L"Not enough features detected.";
         return result;
     }
 
+    const int64_t matchTick = cv::getTickCount();
     cv::BFMatcher matcher(matcherNorm);
     std::vector<std::vector<cv::DMatch>> knnMatches;
     matcher.knnMatch(srcDescriptors, targetDescriptors, knnMatches, 2);
@@ -327,7 +480,7 @@ RegistrationResult RunFeatureMethod(
             continue;
         }
 
-        if (candidates[0].distance < ratioThreshold * candidates[1].distance)
+        if (candidates[0].distance < options.ratioThreshold * candidates[1].distance)
         {
             goodMatches.push_back(candidates[0]);
         }
@@ -337,12 +490,21 @@ RegistrationResult RunFeatureMethod(
     {
         return left.distance < right.distance;
     });
-    if (goodMatches.size() > maxMatchesToKeep)
+    if (goodMatches.size() > options.maxMatchesToKeep)
     {
-        goodMatches.resize(maxMatchesToKeep);
+        goodMatches.resize(options.maxMatchesToKeep);
     }
 
     result.matches = static_cast<int>(goodMatches.size());
+    {
+        CString line;
+        line.Format(
+            L"[%s] Match + ratio test: kept=%d, %.2f ms",
+            methodName.GetString(),
+            result.matches,
+            ElapsedMs(matchTick));
+        AppendLogLine(result.logText, line);
+    }
     if (goodMatches.size() < 4)
     {
         result.message = L"Too few good matches for rigid transform estimation.";
@@ -359,6 +521,7 @@ RegistrationResult RunFeatureMethod(
         targetPoints.push_back(targetKeypoints[match.trainIdx].pt);
     }
 
+    const int64_t ransacTick = cv::getTickCount();
     cv::Mat inlierMask;
     const cv::Mat affine = cv::estimateAffinePartial2D(
         srcPoints,
@@ -379,6 +542,33 @@ RegistrationResult RunFeatureMethod(
     result.inliers = cv::countNonZero(inlierMask);
     result.rigidTransform = ScaleTransformToOriginal(BuildRigidTransform(affine), pair.scale);
     UpdatePoseFields(result);
+    BuildFeatureVisualization(
+        result,
+        srcKeypoints,
+        targetKeypoints,
+        goodMatches,
+        inlierMask,
+        pair.scale,
+        options.visualizationMatches);
+    {
+        CString line;
+        line.Format(
+            L"[%s] RANSAC estimate: inliers=%d/%d, %.2f ms",
+            methodName.GetString(),
+            result.inliers,
+            result.matches,
+            ElapsedMs(ransacTick));
+        AppendLogLine(result.logText, line);
+    }
+    if (result.hasFeatureVisualization)
+    {
+        CString line;
+        line.Format(
+            L"[%s] Visualization prepared for %zu inlier correspondences.",
+            methodName.GetString(),
+            result.srcVisualizationLines.size());
+        AppendLogLine(result.logText, line);
+    }
     result.success = true;
     return result;
 }
@@ -387,27 +577,83 @@ RegistrationResult RunPhaseMethod(const cv::Mat& srcImage, const cv::Mat& target
 {
     RegistrationResult result;
     result.methodName = L"PHASE";
+    const bool largeImage = IsLargeImagePair(srcImage, targetImage);
+    const bool veryLargeImage = IsVeryLargeImagePair(srcImage, targetImage);
+    const int maxDimension = veryLargeImage ? 1200 : (largeImage ? 1400 : 1600);
+    result.usedAcceleration = largeImage;
+    result.accelerationProfile = largeImage
+        ? L"Large-image mode: stronger downsample for fast translation estimation."
+        : L"Standard mode.";
+    {
+        CString line;
+        line.Format(L"[PHASE] Input src=%dx%d, target=%dx%d", srcImage.cols, srcImage.rows, targetImage.cols, targetImage.rows);
+        AppendLogLine(result.logText, line);
+    }
+    AppendLogLine(result.logText, CString(L"[PHASE] Acceleration profile: ") + result.accelerationProfile);
 
-    const WorkingPair pair = PrepareWorkingPair(srcImage, targetImage, 1600);
+    const int64_t prepareTick = cv::getTickCount();
+    const WorkingPair pair = PrepareWorkingPair(srcImage, targetImage, maxDimension);
     result.workingScale = pair.scale;
+    result.workingWidth = pair.src.cols;
+    result.workingHeight = pair.src.rows;
+    {
+        CString line;
+        line.Format(
+            L"[PHASE] Prepare working images: %dx%d / %dx%d, scale=%.5f, %.2f ms",
+            pair.src.cols,
+            pair.src.rows,
+            pair.target.cols,
+            pair.target.rows,
+            pair.scale,
+            ElapsedMs(prepareTick));
+        AppendLogLine(result.logText, line);
+    }
 
+    const int64_t grayTick = cv::getTickCount();
     cv::Mat srcGray;
     cv::Mat targetGray;
     PadToSameSize(ConvertToGray8(pair.src), ConvertToGray8(pair.target), srcGray, targetGray);
+    {
+        CString line;
+        line.Format(L"[PHASE] Convert + pad grayscale: %.2f ms", ElapsedMs(grayTick));
+        AppendLogLine(result.logText, line);
+    }
 
+    const int64_t floatTick = cv::getTickCount();
     cv::Mat srcFloat;
     cv::Mat targetFloat;
     srcGray.convertTo(srcFloat, CV_32F);
     targetGray.convertTo(targetFloat, CV_32F);
+    {
+        CString line;
+        line.Format(L"[PHASE] Convert to float: %.2f ms", ElapsedMs(floatTick));
+        AppendLogLine(result.logText, line);
+    }
 
+    const int64_t phaseTick = cv::getTickCount();
     cv::Mat window;
     cv::createHanningWindow(window, srcFloat.size(), CV_32F);
     const cv::Point2d shift = cv::phaseCorrelate(srcFloat, targetFloat, window);
+    {
+        CString line;
+        line.Format(L"[PHASE] Phase correlation shift=(%.3f, %.3f), %.2f ms", shift.x, shift.y, ElapsedMs(phaseTick));
+        AppendLogLine(result.logText, line);
+    }
 
+    const int64_t rmseTick = cv::getTickCount();
     const cv::Matx33d forward = BuildTranslationTransform(shift.x, shift.y);
     const cv::Matx33d backward = BuildTranslationTransform(-shift.x, -shift.y);
     const double forwardRmse = ComputeImageRmse(pair.src, pair.target, forward);
     const double backwardRmse = ComputeImageRmse(pair.src, pair.target, backward);
+    {
+        CString line;
+        line.Format(
+            L"[PHASE] Direction check: forward RMSE=%.4f, backward RMSE=%.4f, %.2f ms",
+            forwardRmse,
+            backwardRmse,
+            ElapsedMs(rmseTick));
+        AppendLogLine(result.logText, line);
+    }
 
     result.rigidTransform = ScaleTransformToOriginal(
         (forwardRmse <= backwardRmse) ? forward : backward,
@@ -421,35 +667,96 @@ RegistrationResult RunEccMethod(const cv::Mat& srcImage, const cv::Mat& targetIm
 {
     RegistrationResult result;
     result.methodName = L"ECC";
+    const bool largeImage = IsLargeImagePair(srcImage, targetImage);
+    const bool veryLargeImage = IsVeryLargeImagePair(srcImage, targetImage);
+    const int maxDimension = veryLargeImage ? 1200 : (largeImage ? 1500 : 1800);
+    const int maxLevel = veryLargeImage ? 2 : 2;
+    const int maxIterations = veryLargeImage ? 60 : (largeImage ? 80 : 100);
+    result.usedAcceleration = largeImage;
+    result.accelerationProfile = largeImage
+        ? L"Large-image mode: reduced ECC resolution and iterations with phase-based initialization."
+        : L"Standard mode.";
+    {
+        CString line;
+        line.Format(L"[ECC] Input src=%dx%d, target=%dx%d", srcImage.cols, srcImage.rows, targetImage.cols, targetImage.rows);
+        AppendLogLine(result.logText, line);
+    }
+    AppendLogLine(result.logText, CString(L"[ECC] Acceleration profile: ") + result.accelerationProfile);
 
-    const WorkingPair pair = PrepareWorkingPair(srcImage, targetImage, 1800);
+    const int64_t prepareTick = cv::getTickCount();
+    const WorkingPair pair = PrepareWorkingPair(srcImage, targetImage, maxDimension);
     result.workingScale = pair.scale;
+    result.workingWidth = pair.src.cols;
+    result.workingHeight = pair.src.rows;
+    {
+        CString line;
+        line.Format(
+            L"[ECC] Prepare working images: %dx%d / %dx%d, scale=%.5f, %.2f ms",
+            pair.src.cols,
+            pair.src.rows,
+            pair.target.cols,
+            pair.target.rows,
+            pair.scale,
+            ElapsedMs(prepareTick));
+        AppendLogLine(result.logText, line);
+    }
 
+    const int64_t grayTick = cv::getTickCount();
     cv::Mat srcGray;
     cv::Mat targetGray;
     PadToSameSize(ConvertToGray8(pair.src), ConvertToGray8(pair.target), srcGray, targetGray);
+    {
+        CString line;
+        line.Format(L"[ECC] Convert + pad grayscale: %.2f ms", ElapsedMs(grayTick));
+        AppendLogLine(result.logText, line);
+    }
 
+    const int64_t floatTick = cv::getTickCount();
     cv::Mat srcFloat;
     cv::Mat targetFloat;
     srcGray.convertTo(srcFloat, CV_32F, 1.0 / 255.0);
     targetGray.convertTo(targetFloat, CV_32F, 1.0 / 255.0);
+    {
+        CString line;
+        line.Format(L"[ECC] Normalize to float: %.2f ms", ElapsedMs(floatTick));
+        AppendLogLine(result.logText, line);
+    }
 
-    constexpr int maxLevel = 2;
+    const int64_t pyramidTick = cv::getTickCount();
     std::vector<cv::Mat> srcPyramid;
     std::vector<cv::Mat> targetPyramid;
     cv::buildPyramid(srcFloat, srcPyramid, maxLevel);
     cv::buildPyramid(targetFloat, targetPyramid, maxLevel);
+    {
+        CString line;
+        line.Format(
+            L"[ECC] Build pyramid: levels=%d, coarsest=%dx%d, %.2f ms",
+            maxLevel + 1,
+            srcPyramid.back().cols,
+            srcPyramid.back().rows,
+            ElapsedMs(pyramidTick));
+        AppendLogLine(result.logText, line);
+    }
 
     cv::Mat warp = cv::Mat::eye(2, 3, CV_32F);
 
     {
+        const int64_t initTick = cv::getTickCount();
         cv::Mat coarseWindow;
         cv::createHanningWindow(coarseWindow, srcPyramid.back().size(), CV_32F);
         const cv::Point2d initialShift = cv::phaseCorrelate(srcPyramid.back(), targetPyramid.back(), coarseWindow);
         warp.at<float>(0, 2) = static_cast<float>(initialShift.x);
         warp.at<float>(1, 2) = static_cast<float>(initialShift.y);
+        CString line;
+        line.Format(
+            L"[ECC] Phase init at coarsest level: shift=(%.3f, %.3f), %.2f ms",
+            initialShift.x,
+            initialShift.y,
+            ElapsedMs(initTick));
+        AppendLogLine(result.logText, line);
     }
 
+    const int64_t eccTick = cv::getTickCount();
     for (int level = maxLevel; level >= 0; --level)
     {
         if (level < maxLevel)
@@ -458,7 +765,7 @@ RegistrationResult RunEccMethod(const cv::Mat& srcImage, const cv::Mat& targetIm
             warp.at<float>(1, 2) *= 2.0f;
         }
 
-        const cv::TermCriteria criteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, 100, 1e-5);
+        const cv::TermCriteria criteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, maxIterations, 1e-5);
         cv::findTransformECC(
             targetPyramid[level],
             srcPyramid[level],
@@ -467,6 +774,14 @@ RegistrationResult RunEccMethod(const cv::Mat& srcImage, const cv::Mat& targetIm
             criteria,
             cv::noArray(),
             5);
+    }
+    {
+        CString line;
+        line.Format(
+            L"[ECC] Optimize transform across pyramid: iterations<=%d, %.2f ms",
+            maxIterations,
+            ElapsedMs(eccTick));
+        AppendLogLine(result.logText, line);
     }
 
     result.rigidTransform = ScaleTransformToOriginal(BuildRigidTransform(warp), pair.scale);
@@ -482,13 +797,30 @@ void FinalizeResult(RegistrationResult& result, const cv::Mat& srcImage, const c
         return;
     }
 
+    const int64_t rmseTick = cv::getTickCount();
     result.rmse = ComputeImageRmse(srcImage, targetImage, result.rigidTransform);
+    {
+        CString line;
+        line.Format(L"[%s] Compute overlap RMSE: %.4f, %.2f ms", result.methodName.GetString(), result.rmse, ElapsedMs(rmseTick));
+        AppendLogLine(result.logText, line);
+    }
+    const int64_t stitchTick = cv::getTickCount();
     result.stitchedImage = StitchImages(srcImage, targetImage, result.rigidTransform);
     if (result.stitchedImage.empty())
     {
         result.success = false;
         result.message = L"Transform estimated, but stitching failed.";
         return;
+    }
+    {
+        CString line;
+        line.Format(
+            L"[%s] Stitch images: result=%dx%d, %.2f ms",
+            result.methodName.GetString(),
+            result.stitchedImage.cols,
+            result.stitchedImage.rows,
+            ElapsedMs(stitchTick));
+        AppendLogLine(result.logText, line);
     }
 
     if (result.message.IsEmpty())
@@ -533,6 +865,8 @@ RegistrationResult CRegistrationEngine::RegisterAndStitch(
             return result;
         }
 
+        const bool largeImage = IsLargeImagePair(srcImage, targetImage);
+        const bool veryLargeImage = IsVeryLargeImagePair(srcImage, targetImage);
         cv::TickMeter timer;
         timer.start();
 
@@ -542,38 +876,65 @@ RegistrationResult CRegistrationEngine::RegisterAndStitch(
             result = RunPhaseMethod(srcImage, targetImage);
             break;
         case RegistrationMethod::Orb:
+        {
+            FeatureMethodOptions options;
+            options.maxDimension = veryLargeImage ? 1200 : (largeImage ? 1400 : 1600);
+            options.ratioThreshold = 0.78f;
+            options.maxMatchesToKeep = veryLargeImage ? 260 : (largeImage ? 360 : 500);
+            options.visualizationMatches = 80;
+            options.usedAcceleration = largeImage;
+            options.accelerationProfile = largeImage
+                ? L"Large-image mode: ORB features capped and stronger downsample enabled."
+                : L"Standard mode.";
             result = RunFeatureMethod(
                 srcImage,
                 targetImage,
                 L"ORB",
-                cv::ORB::create(2500),
+                cv::ORB::create(veryLargeImage ? 1400 : (largeImage ? 1800 : 2500)),
                 cv::NORM_HAMMING,
-                1600,
-                0.78f,
-                500);
+                options);
             break;
+        }
         case RegistrationMethod::Akaze:
+        {
+            FeatureMethodOptions options;
+            options.maxDimension = veryLargeImage ? 1200 : (largeImage ? 1500 : 1800);
+            options.ratioThreshold = 0.80f;
+            options.maxMatchesToKeep = veryLargeImage ? 280 : (largeImage ? 420 : 700);
+            options.visualizationMatches = 80;
+            options.usedAcceleration = largeImage;
+            options.accelerationProfile = largeImage
+                ? L"Large-image mode: AKAZE uses reduced working resolution and fewer retained matches."
+                : L"Standard mode.";
             result = RunFeatureMethod(
                 srcImage,
                 targetImage,
                 L"AKAZE",
                 cv::AKAZE::create(),
                 cv::NORM_HAMMING,
-                1800,
-                0.80f,
-                700);
+                options);
             break;
+        }
         case RegistrationMethod::Sift:
+        {
+            FeatureMethodOptions options;
+            options.maxDimension = veryLargeImage ? 1280 : (largeImage ? 1500 : 2000);
+            options.ratioThreshold = 0.75f;
+            options.maxMatchesToKeep = veryLargeImage ? 320 : (largeImage ? 500 : 900);
+            options.visualizationMatches = 80;
+            options.usedAcceleration = largeImage;
+            options.accelerationProfile = largeImage
+                ? L"Large-image mode: SIFT feature count capped and working resolution reduced."
+                : L"Standard mode.";
             result = RunFeatureMethod(
                 srcImage,
                 targetImage,
                 L"SIFT",
-                cv::SIFT::create(3000),
+                cv::SIFT::create(veryLargeImage ? 1400 : (largeImage ? 1800 : 3000)),
                 cv::NORM_L2,
-                2000,
-                0.75f,
-                900);
+                options);
             break;
+        }
         case RegistrationMethod::Ecc:
             result = RunEccMethod(srcImage, targetImage);
             break;
@@ -586,6 +947,11 @@ RegistrationResult CRegistrationEngine::RegisterAndStitch(
 
         timer.stop();
         result.elapsedMs = timer.getTimeMilli();
+        {
+            CString line;
+            line.Format(L"[%s] Total elapsed: %.2f ms", result.methodName.GetString(), result.elapsedMs);
+            AppendLogLine(result.logText, line);
+        }
     }
     catch (const cv::Exception& ex)
     {

@@ -64,6 +64,7 @@ compile_commands.json
 
 # Visual Studio / IDE files
 .arts/
+.vs/
 *.user
 *.suo
 *.opensdf

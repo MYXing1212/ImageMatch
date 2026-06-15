@@ -51,6 +51,30 @@ CString FormatMatrix(const cv::Matx33d& matrix)
     }
     return CString(stream.str().c_str());
 }
+
+void ApplyVisualizationOverlay(
+    CImageViewPane& pane,
+    const std::vector<cv::Point2d>& keypoints,
+    const std::vector<MatchLineSegment>& lineSegments)
+{
+    std::vector<ImageOverlayPoint> points;
+    std::vector<ImageOverlayLine> lines;
+    points.reserve(keypoints.size() + lineSegments.size());
+    lines.reserve(lineSegments.size());
+
+    for (const auto& point : keypoints)
+    {
+        points.push_back({point, RGB(80, 255, 80), 3});
+    }
+
+    for (const auto& segment : lineSegments)
+    {
+        lines.push_back({segment.start, segment.end, RGB(0, 220, 255), 1});
+        points.push_back({segment.end, RGB(255, 180, 0), 2});
+    }
+
+    pane.SetOverlay(points, lines);
+}
 }
 
 BEGIN_MESSAGE_MAP(CMainDialog, CDialogEx)
@@ -150,6 +174,7 @@ bool CMainDialog::LoadImageFromPath(const CString& filePath, bool isSourceImage)
     {
         m_srcImage = image;
         m_srcPane.SetImage(m_srcImage);
+        m_srcPane.ClearOverlay();
     }
     else
     {
@@ -157,6 +182,8 @@ bool CMainDialog::LoadImageFromPath(const CString& filePath, bool isSourceImage)
         m_targetPane.SetImage(m_targetImage);
     }
 
+    m_srcPane.ClearOverlay();
+    m_targetPane.ClearOverlay();
     m_stitchedImage.release();
     m_resultPane.ClearImage();
     UpdateResultText(FormatRegistrationSummary());
@@ -178,14 +205,37 @@ void CMainDialog::RunRegistration(RegistrationMethod method)
     const RegistrationResult result = CRegistrationEngine::RegisterAndStitch(m_srcImage, m_targetImage, method);
     if (!result.success)
     {
+        m_srcPane.SetImage(m_srcImage);
+        m_targetPane.SetImage(m_targetImage);
+        m_srcPane.ClearOverlay();
+        m_targetPane.ClearOverlay();
         CString errorText;
-        errorText.Format(L"%s failed.\r\n%s", result.methodName.GetString(), result.message.GetString());
+        errorText.Format(
+            L"%s failed.\r\n%s%s%s",
+            result.methodName.GetString(),
+            result.message.GetString(),
+            result.logText.IsEmpty() ? L"" : L"\r\n\r\nLogs:\r\n",
+            result.logText.GetString());
         UpdateResultText(errorText);
         return;
     }
 
+    m_srcPane.SetImage(m_srcImage);
+    m_targetPane.SetImage(m_targetImage);
+    if (result.hasFeatureVisualization)
+    {
+        ApplyVisualizationOverlay(m_srcPane, result.srcVisualizationPoints, result.srcVisualizationLines);
+        ApplyVisualizationOverlay(m_targetPane, result.targetVisualizationPoints, result.targetVisualizationLines);
+    }
+    else
+    {
+        m_srcPane.ClearOverlay();
+        m_targetPane.ClearOverlay();
+    }
+
     m_stitchedImage = result.stitchedImage.clone();
     m_resultPane.SetImage(m_stitchedImage);
+    m_resultPane.ClearOverlay();
     UpdateResultText(BuildResultSummary(result));
 }
 
@@ -297,6 +347,8 @@ CString CMainDialog::BuildResultSummary(const RegistrationResult& result) const
         L"Status: %s\r\n"
         L"Elapsed: %.2f ms\r\n"
         L"Working scale: %.4f\r\n"
+        L"Working size: %d x %d\r\n"
+        L"Acceleration: %s\r\n"
         L"Source keypoints: %d\r\n"
         L"Target keypoints: %d\r\n"
         L"Good matches: %d\r\n"
@@ -304,11 +356,15 @@ CString CMainDialog::BuildResultSummary(const RegistrationResult& result) const
         L"Rotation (deg): %.4f\r\n"
         L"Translation (tx, ty): (%.4f, %.4f)\r\n"
         L"Overlap RMSE: %.4f\r\n"
-        L"RT matrix:\r\n%s",
+        L"Feature overlay: %s\r\n"
+        L"RT matrix:\r\n%s%s%s",
         result.methodName.GetString(),
         result.message.GetString(),
         result.elapsedMs,
         result.workingScale,
+        result.workingWidth,
+        result.workingHeight,
+        result.accelerationProfile.IsEmpty() ? L"n/a" : result.accelerationProfile.GetString(),
         result.keypointsSrc,
         result.keypointsTarget,
         result.matches,
@@ -317,7 +373,10 @@ CString CMainDialog::BuildResultSummary(const RegistrationResult& result) const
         result.translation.x,
         result.translation.y,
         result.rmse,
-        FormatMatrix(result.rigidTransform).GetString());
+        result.hasFeatureVisualization ? L"shown in Source/Target panes" : L"not applicable",
+        FormatMatrix(result.rigidTransform).GetString(),
+        result.logText.IsEmpty() ? L"" : L"\r\n\r\nLogs:\r\n",
+        result.logText.GetString());
     return summary;
 }
 

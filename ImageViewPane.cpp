@@ -3,7 +3,7 @@
 
 namespace
 {
-constexpr double kMinScale = 0.05;
+constexpr double kAbsoluteMinScale = 0.0001;
 constexpr double kMaxScale = 40.0;
 }
 
@@ -22,6 +22,7 @@ CImageViewPane::CImageViewPane()
     : m_scale(1.0),
       m_offset(0.0, 0.0),
       m_isDragging(false),
+      m_keepImageFitted(true),
       m_lastMousePoint(0, 0)
 {
 }
@@ -53,16 +54,33 @@ BOOL CImageViewPane::CreatePane(CWnd* pParentWnd, UINT controlId, const CString&
 
 void CImageViewPane::SetImage(const cv::Mat& image)
 {
-    m_image = NormalizeToBgr(image);
+    m_image = NormalizeToBgra(image);
     FitImageToClient();
+    Invalidate();
+}
+
+void CImageViewPane::SetOverlay(const std::vector<ImageOverlayPoint>& points, const std::vector<ImageOverlayLine>& lines)
+{
+    m_overlayPoints = points;
+    m_overlayLines = lines;
+    Invalidate();
+}
+
+void CImageViewPane::ClearOverlay()
+{
+    m_overlayPoints.clear();
+    m_overlayLines.clear();
     Invalidate();
 }
 
 void CImageViewPane::ClearImage()
 {
     m_image.release();
+    m_overlayPoints.clear();
+    m_overlayLines.clear();
     m_scale = 1.0;
     m_offset = cv::Point2d(0.0, 0.0);
+    m_keepImageFitted = true;
     Invalidate();
 }
 
@@ -122,7 +140,7 @@ void CImageViewPane::DrawContent(CDC& dc, const CRect& clientRect)
     bitmapInfo.bmiHeader.biWidth = m_image.cols;
     bitmapInfo.bmiHeader.biHeight = -m_image.rows;
     bitmapInfo.bmiHeader.biPlanes = 1;
-    bitmapInfo.bmiHeader.biBitCount = 24;
+    bitmapInfo.bmiHeader.biBitCount = 32;
     bitmapInfo.bmiHeader.biCompression = BI_RGB;
 
     dc.SetStretchBltMode(HALFTONE);
@@ -142,6 +160,30 @@ void CImageViewPane::DrawContent(CDC& dc, const CRect& clientRect)
         &bitmapInfo,
         DIB_RGB_COLORS,
         SRCCOPY);
+
+    for (const auto& line : m_overlayLines)
+    {
+        CPen pen(PS_SOLID, std::max(1, line.width), line.color);
+        CPen* oldPen = dc.SelectObject(&pen);
+        const CPoint start = ImageToClient(line.start);
+        const CPoint end = ImageToClient(line.end);
+        dc.MoveTo(start);
+        dc.LineTo(end);
+        dc.SelectObject(oldPen);
+    }
+
+    for (const auto& point : m_overlayPoints)
+    {
+        CBrush brush(point.color);
+        CBrush* oldBrush = dc.SelectObject(&brush);
+        CPen pen(PS_SOLID, 1, point.color);
+        CPen* oldPen = dc.SelectObject(&pen);
+        const CPoint center = ImageToClient(point.position);
+        const int radius = std::max(2, point.radius);
+        dc.Ellipse(center.x - radius, center.y - radius, center.x + radius, center.y + radius);
+        dc.SelectObject(oldPen);
+        dc.SelectObject(oldBrush);
+    }
 }
 
 BOOL CImageViewPane::OnEraseBkgnd(CDC* pDC)
@@ -153,7 +195,7 @@ BOOL CImageViewPane::OnEraseBkgnd(CDC* pDC)
 void CImageViewPane::OnSize(UINT nType, int cx, int cy)
 {
     CWnd::OnSize(nType, cx, cy);
-    if (!m_image.empty() && cx > 0 && cy > 0 && m_scale <= kMinScale)
+    if (!m_image.empty() && cx > 0 && cy > 0 && m_keepImageFitted)
     {
         FitImageToClient();
     }
@@ -164,6 +206,7 @@ void CImageViewPane::OnLButtonDown(UINT nFlags, CPoint point)
     SetFocus();
     SetCapture();
     m_isDragging = true;
+    m_keepImageFitted = false;
     m_lastMousePoint = point;
     CWnd::OnLButtonDown(nFlags, point);
 }
@@ -200,15 +243,18 @@ BOOL CImageViewPane::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt)
 
     ScreenToClient(&pt);
     const cv::Point2d imagePoint = ClientToImage(pt);
+    CRect clientRect;
+    GetClientRect(&clientRect);
 
     const double factor = (zDelta > 0) ? 1.15 : (1.0 / 1.15);
-    const double newScale = std::clamp(m_scale * factor, kMinScale, kMaxScale);
+    const double newScale = std::clamp(m_scale * factor, GetMinScaleForClient(clientRect), kMaxScale);
     if (std::abs(newScale - m_scale) < 1e-8)
     {
         return TRUE;
     }
 
     m_scale = newScale;
+    m_keepImageFitted = false;
     m_offset.x = pt.x - imagePoint.x * m_scale;
     m_offset.y = pt.y - imagePoint.y * m_scale;
     RedrawWindow(nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOERASE);
@@ -247,9 +293,23 @@ void CImageViewPane::FitImageToClient()
 
     const double scaleX = static_cast<double>(clientRect.Width()) / static_cast<double>(m_image.cols);
     const double scaleY = static_cast<double>(clientRect.Height()) / static_cast<double>(m_image.rows);
-    m_scale = std::clamp(std::min(scaleX, scaleY), kMinScale, kMaxScale);
+    m_scale = std::clamp(std::min(scaleX, scaleY), GetMinScaleForClient(clientRect), kMaxScale);
     m_offset.x = (clientRect.Width() - m_image.cols * m_scale) * 0.5;
     m_offset.y = (clientRect.Height() - m_image.rows * m_scale) * 0.5;
+    m_keepImageFitted = true;
+}
+
+double CImageViewPane::GetMinScaleForClient(const CRect& clientRect) const
+{
+    UNREFERENCED_PARAMETER(clientRect);
+    return kAbsoluteMinScale;
+}
+
+CPoint CImageViewPane::ImageToClient(const cv::Point2d& point) const
+{
+    return CPoint(
+        static_cast<int>(std::lround(point.x * m_scale + m_offset.x)),
+        static_cast<int>(std::lround(point.y * m_scale + m_offset.y)));
 }
 
 cv::Point2d CImageViewPane::ClientToImage(const CPoint& point) const
@@ -259,7 +319,7 @@ cv::Point2d CImageViewPane::ClientToImage(const CPoint& point) const
         (point.y - m_offset.y) / m_scale);
 }
 
-cv::Mat CImageViewPane::NormalizeToBgr(const cv::Mat& image) const
+cv::Mat CImageViewPane::NormalizeToBgra(const cv::Mat& image) const
 {
     if (image.empty())
     {
@@ -267,17 +327,17 @@ cv::Mat CImageViewPane::NormalizeToBgr(const cv::Mat& image) const
     }
 
     cv::Mat result;
-    if (image.type() == CV_8UC3)
+    if (image.type() == CV_8UC4)
     {
         result = image.clone();
     }
+    else if (image.type() == CV_8UC3)
+    {
+        cv::cvtColor(image, result, cv::COLOR_BGR2BGRA);
+    }
     else if (image.type() == CV_8UC1)
     {
-        cv::cvtColor(image, result, cv::COLOR_GRAY2BGR);
-    }
-    else if (image.type() == CV_8UC4)
-    {
-        cv::cvtColor(image, result, cv::COLOR_BGRA2BGR);
+        cv::cvtColor(image, result, cv::COLOR_GRAY2BGRA);
     }
     else
     {
@@ -285,16 +345,26 @@ cv::Mat CImageViewPane::NormalizeToBgr(const cv::Mat& image) const
         image.convertTo(normalized, CV_8U);
         if (normalized.channels() == 1)
         {
-            cv::cvtColor(normalized, result, cv::COLOR_GRAY2BGR);
+            cv::cvtColor(normalized, result, cv::COLOR_GRAY2BGRA);
         }
         else if (normalized.channels() == 4)
         {
-            cv::cvtColor(normalized, result, cv::COLOR_BGRA2BGR);
+            result = normalized.clone();
+        }
+        else if (normalized.channels() == 3)
+        {
+            cv::cvtColor(normalized, result, cv::COLOR_BGR2BGRA);
         }
         else
         {
-            result = normalized;
+            cv::Mat flattened = normalized.reshape(1);
+            cv::cvtColor(flattened, result, cv::COLOR_GRAY2BGRA);
         }
+    }
+
+    if (!result.isContinuous())
+    {
+        result = result.clone();
     }
     return result;
 }

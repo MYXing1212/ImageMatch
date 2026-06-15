@@ -10,6 +10,21 @@ struct ImagePaneDropPayload
     CString filePath;
 };
 
+struct ImageOverlayPoint
+{
+    cv::Point2d position = cv::Point2d(0.0, 0.0);
+    COLORREF color = RGB(0, 255, 0);
+    int radius = 3;
+};
+
+struct ImageOverlayLine
+{
+    cv::Point2d start = cv::Point2d(0.0, 0.0);
+    cv::Point2d end = cv::Point2d(0.0, 0.0);
+    COLORREF color = RGB(0, 255, 255);
+    int width = 1;
+};
+
 class CImageViewPane : public CWnd
 {
 public:
@@ -17,6 +32,8 @@ public:
 
     BOOL CreatePane(CWnd* pParentWnd, UINT controlId, const CString& title);
     void SetImage(const cv::Mat& image);
+    void SetOverlay(const std::vector<ImageOverlayPoint>& points, const std::vector<ImageOverlayLine>& lines);
+    void ClearOverlay();
     void ClearImage();
     void ResetView();
 
@@ -35,14 +52,19 @@ protected:
 private:
     void DrawContent(CDC& dc, const CRect& clientRect);
     void FitImageToClient();
+    double GetMinScaleForClient(const CRect& clientRect) const;
+    CPoint ImageToClient(const cv::Point2d& point) const;
     cv::Point2d ClientToImage(const CPoint& point) const;
-    cv::Mat NormalizeToBgr(const cv::Mat& image) const;
+    cv::Mat NormalizeToBgra(const cv::Mat& image) const;
 
 private:
     CString m_title;
     cv::Mat m_image;
+    std::vector<ImageOverlayPoint> m_overlayPoints;
+    std::vector<ImageOverlayLine> m_overlayLines;
     double m_scale;
     cv::Point2d m_offset;
     bool m_isDragging;
+    bool m_keepImageFitted;
     CPoint m_lastMousePoint;
 };
