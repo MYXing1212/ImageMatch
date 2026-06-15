@@ -34,6 +34,8 @@ public:
     void SetImage(const cv::Mat& image);
     void SetOverlay(const std::vector<ImageOverlayPoint>& points, const std::vector<ImageOverlayLine>& lines);
     void ClearOverlay();
+    void ShowToast(const CString& message, COLORREF textColor = RGB(255, 255, 255), UINT durationMs = 1800);
+    void ClearToast();
     void ClearImage();
     void ResetView();
 
@@ -41,6 +43,7 @@ protected:
     afx_msg void OnPaint();
     afx_msg BOOL OnEraseBkgnd(CDC* pDC);
     afx_msg void OnSize(UINT nType, int cx, int cy);
+    afx_msg void OnTimer(UINT_PTR nIDEvent);
     afx_msg void OnLButtonDown(UINT nFlags, CPoint point);
     afx_msg void OnLButtonUp(UINT nFlags, CPoint point);
     afx_msg void OnMouseMove(UINT nFlags, CPoint point);
@@ -59,6 +62,7 @@ private:
 
 private:
     CString m_title;
+    CString m_toastMessage;
     cv::Mat m_image;
     std::vector<ImageOverlayPoint> m_overlayPoints;
     std::vector<ImageOverlayLine> m_overlayLines;
@@ -66,5 +70,6 @@ private:
     cv::Point2d m_offset;
     bool m_isDragging;
     bool m_keepImageFitted;
+    COLORREF m_toastTextColor;
     CPoint m_lastMousePoint;
 };
