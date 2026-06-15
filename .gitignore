@@ -1,0 +1,16 @@
+bin/
+obj/
+.arts/
+*.user
+*.suo
+*.opensdf
+*.sdf
+*.VC.db
+*.VC.opendb
+*.ipch
+*.pdb
+*.ilk
+*.tlog
+*.lastbuildstate
+*.recipe
+*.log
